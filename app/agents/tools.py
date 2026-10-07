@@ -141,15 +141,26 @@ def build_tools(
         return _dump({"matches": [{"contact": _contact_dict(c), "message": _message_dict(m)} for m, c in rows]})
 
     @tool
-    async def count_contacts(by_country: bool = False) -> str:
-        """Count stored contacts (individuals vs groups). by_country=true adds a breakdown by phone country code."""
+    async def count_contacts(
+        by_country: bool = False,
+        has_phone: bool | None = None,
+        phone_prefix: str | None = None,
+    ) -> str:
+        """Count stored contacts. Always returns total, individuals, groups, with_phone and without_phone.
+        has_phone / phone_prefix (e.g. "+1") add a `matching` count for that filter.
+        by_country=true adds a breakdown by phone country (ISO region code)."""
         async with session_factory() as s:
             repo = ContactRepository(s)
             result: dict[str, Any] = {
                 "total": await repo.count(),
                 "individuals": await repo.count(is_group=False),
                 "groups": await repo.count(is_group=True),
+                "with_phone": await repo.count(has_phone=True),
+                "without_phone": await repo.count(has_phone=False),
             }
+            if has_phone is not None or phone_prefix:
+                result["filter"] = {"has_phone": has_phone, "phone_prefix": phone_prefix}
+                result["matching"] = await repo.count(has_phone=has_phone, phone_prefix=phone_prefix)
             if by_country:
                 phones = (
                     await s.execute(select(Contact.phone_number).where(Contact.phone_number.is_not(None)))

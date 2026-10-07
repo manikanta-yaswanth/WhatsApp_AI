@@ -111,10 +111,22 @@ class ContactRepository:
         rows = (await self.session.execute(q.limit(limit).offset(offset))).all()
         return total, [(r[0], r.message_count, r.last_message_at, r.category) for r in rows]
 
-    async def count(self, is_group: bool | None = None) -> int:
+    async def count(
+        self,
+        is_group: bool | None = None,
+        has_phone: bool | None = None,
+        phone_prefix: str | None = None,
+    ) -> int:
         q = select(func.count(Contact.id))
         if is_group is not None:
             q = q.where(Contact.is_group.is_(is_group))
+        if has_phone is True:
+            q = q.where(Contact.phone_number.is_not(None))
+        elif has_phone is False:
+            q = q.where(Contact.phone_number.is_(None))
+        if phone_prefix:
+            prefix = phone_prefix if phone_prefix.startswith("+") else f"+{phone_prefix}"
+            q = q.where(Contact.phone_number.startswith(prefix))
         return (await self.session.execute(q)).scalar_one()
 
     async def find_by_name_or_id(self, ref: str) -> Contact | None:

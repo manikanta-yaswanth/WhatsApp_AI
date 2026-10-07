@@ -1,5 +1,6 @@
 from app.db.repositories.contact_repository import ContactRepository
 from app.db.repositories.quality_repository import QualityRepository
+from app.schemas.contact import ContactIn
 from app.services.scrape_service import persist_conversations
 from tests.factories import conversation
 
@@ -33,3 +34,17 @@ async def test_search_filters(session_factory) -> None:  # type: ignore[no-untyp
         report = await QualityRepository(s).report(3)
     assert report["contacts"] == 3 and report["missing_phone_numbers"] == 1
     assert report["quality_score"] == 1.0
+
+
+async def test_count_filters_phone(session_factory) -> None:  # type: ignore[no-untyped-def]
+    async with session_factory() as session:
+        repo = ContactRepository(session)
+        await repo.upsert(ContactIn(whatsapp_id="14155550101@c.us", contact_name="A", phone_number="+14155550101"))
+        await repo.upsert(ContactIn(whatsapp_id="919876543210@c.us", contact_name="B", phone_number="+919876543210"))
+        await repo.upsert(ContactIn(whatsapp_id="84213@lid", contact_name=None, phone_number=None))
+        await session.commit()
+        assert await repo.count() == 3
+        assert await repo.count(has_phone=False) == 1
+        assert await repo.count(has_phone=True) == 2
+        assert await repo.count(phone_prefix="1") == 1
+        assert await repo.count(phone_prefix="+91") == 1

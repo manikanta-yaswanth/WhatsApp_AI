@@ -12,16 +12,42 @@ FastAPI /api/v1 ◄────────────────────�
 ## Stack
 Python 3.12, uv, Playwright, FastAPI, Pydantic v2, SQLAlchemy 2 (async, asyncpg), Alembic, LangGraph, langchain-openai, structlog, pytest.
 
-## Setup
+## Local setup (VS Code)
+
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a PostgreSQL 14+ server.
 
 ```bash
-uv sync
-uv run playwright install chromium        # add --with-deps on a fresh Linux box
-cp .env.example .env                      # set DATABASE_URL, OPENAI_API_KEY
-uv run alembic upgrade head
+git clone <repo> && cd whatsapp-ai-platform
+uv sync                                    # creates .venv (select it as the VS Code interpreter)
+uv run playwright install chromium         # add --with-deps on a fresh Linux box
+cp .env.example .env
 ```
 
-Postgres: either your own server (create a dedicated role + `whatsapp_ai` DB), or `docker compose up -d postgres`.
+Create the database (psql as a superuser), or skip this and run `docker compose up -d postgres`:
+```sql
+CREATE ROLE whatsapp_app LOGIN PASSWORD 'change-me';
+CREATE DATABASE whatsapp_ai OWNER whatsapp_app;
+```
+
+Edit `.env`:
+```env
+DATABASE_URL=postgresql+asyncpg://whatsapp_app:change-me@localhost:5432/whatsapp_ai
+OPENAI_API_KEY=sk-...
+```
+
+Create the tables and check the connection:
+```bash
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload       # http://localhost:8000/api/v1/health  ->  "database": "ok"
+```
+
+Windows: use the same commands in PowerShell; `uv` installs with
+`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+
+Optional — try the API and agents without WhatsApp by loading fake demo data:
+```bash
+uv run python scripts/seed_demo.py
+```
 
 ## 1. Log in to WhatsApp (once)
 
