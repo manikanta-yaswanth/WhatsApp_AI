@@ -1,0 +1,10 @@
+[
+  {"question": "How many contacts are stored?", "expected_tools": ["count_contacts"]},
+  {"question": "Which contacts have no phone number?", "expected_tools": ["search_contacts"]},
+  {"question": "How many contacts have US numbers?", "expected_tools": ["count_contacts"]},
+  {"question": "Show me the latest messages from my most recently active contact.", "expected_tools": ["get_recent_conversations"]},
+  {"question": "Which people recently asked me about a meeting?", "expected_tools": ["classify_recent_conversations"]},
+  {"question": "Who are the most important contacts I talked to recently?"},
+  {"question": "Search my messages for anything about a job or interview.", "expected_tools": ["search_messages"]},
+  {"question": "Are there any data quality problems in my stored data?", "expected_tools": ["data_quality_report"]}
+]
