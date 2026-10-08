@@ -10,10 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import get_settings  # noqa: E402
-from app.scraper.auth import LoginState, open_whatsapp, wait_for_state  # noqa: E402
-from app.scraper.browser import BrowserManager  # noqa: E402
-from app.utils.logging import configure_logging  # noqa: E402
+from scraper.auth import LoginState, open_whatsapp, wait_for_state  # noqa: E402
+from scraper.browser import BrowserManager  # noqa: E402
+from utils.logging import configure_logging  # noqa: E402
+from utils.settings import get_settings  # noqa: E402
 
 
 async def main(timeout: int) -> int:

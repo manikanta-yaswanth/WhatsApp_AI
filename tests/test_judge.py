@@ -1,13 +1,11 @@
 import json
 from pathlib import Path
 
-from sqlalchemy import select
-
-from app.db.models import Evaluation
-from app.evaluation.judge import create_evaluation_run, run_evaluation
-from app.schemas.agent import EvaluationResult
-from app.services.agent_service import AgentService
+from evaluation.judge import create_evaluation_run, run_evaluation
+from Models.schema import EvaluationResult
 from tests.test_agents import make_responder
+from utils.agent_runner import AgentService
+from utils.repositories import RunRepository
 
 
 def test_final_score_weights() -> None:
@@ -17,7 +15,7 @@ def test_final_score_weights() -> None:
     assert r.final_score == 0.5
 
 
-async def test_evaluation_run_stores_metrics(session_factory, settings, scripted, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+async def test_evaluation_run_stores_metrics(database, settings, scripted, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     dataset = tmp_path / "q.json"
     dataset.write_text(
         json.dumps(
@@ -28,11 +26,11 @@ async def test_evaluation_run_stores_metrics(session_factory, settings, scripted
         )
     )
     llm = scripted(make_responder("contact", [("count_contacts", {})], "0 contacts.", [0.9, 0.8]))
-    service = AgentService(settings, session_factory, llm)
+    service = AgentService(settings, database, llm)
     run = await run_evaluation(service, await create_evaluation_run(service, dataset), dataset)
     assert run.status == "completed" and run.total_questions == 2
     assert run.metrics["tool_accuracy"] == 0.5
     assert run.metrics["schema_compliance"] == 1.0
-    async with session_factory() as s:
-        rows = list((await s.execute(select(Evaluation))).scalars())
-    assert sorted(r.final_score for r in rows) == [0.8, 0.9]
+    with database.transaction() as s:
+        rows = RunRepository(s).evaluations()
+    assert sorted(r.final_score for r in rows if r.final_score is not None) == [0.8, 0.9]

@@ -14,3 +14,5 @@ wheels/
 playwright/.auth/*
 !playwright/.auth/.gitkeep
 debug/
+data/graphs/
+data/exports/

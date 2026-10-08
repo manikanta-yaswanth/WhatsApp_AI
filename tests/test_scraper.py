@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from app.scraper.parser import parse_dom_payload, parse_pre_plain_text, parse_store_payload
-from app.utils.phone import normalize_phone, phone_from_whatsapp_id
+from scraper.parser import parse_dom_payload, parse_pre_plain_text, parse_store_payload
+from utils.phone import normalize_phone, phone_from_whatsapp_id
 
 
 def _store_chat(**over):  # type: ignore[no-untyped-def]

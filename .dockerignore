@@ -5,3 +5,5 @@ playwright/.auth
 .mypy_cache
 .ruff_cache
 .pytest_cache
+.git
+data/graphs

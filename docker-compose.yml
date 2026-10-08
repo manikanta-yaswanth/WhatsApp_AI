@@ -12,12 +12,11 @@ services:
       interval: 5s
       retries: 10
 
-  api:
+  cli:
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/whatsapp_ai
-    ports: ["8000:8000"]
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/whatsapp_ai
     volumes: ["./playwright/.auth:/app/playwright/.auth"]
     depends_on:
       postgres: {condition: service_healthy}

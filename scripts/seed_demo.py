@@ -1,20 +1,17 @@
-"""Load a few fake contacts/messages so the API and agents can be tried without a WhatsApp login.
+"""Load fake contacts/messages for agents without a WhatsApp login.
 
 Usage: uv run python scripts/seed_demo.py
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datetime import UTC, datetime, timedelta
 
-from app.db.database import get_session_factory
-from app.schemas.contact import ContactIn
-from app.schemas.conversation import ScrapedConversation
-from app.schemas.message import MessageIn
-from app.services.scrape_service import persist_conversations
+from Models.schema import ContactIn, MessageIn, ScrapedConversation
+from utils.database import DatabaseUtil
+from utils.feed_db import persist_conversations
 
 now = datetime.now(UTC)
 
@@ -58,10 +55,12 @@ data = [
 ]
 
 
-async def main():
-    async with get_session_factory()() as s:
-        print(await persist_conversations(s, data, keep=3))
-        await s.commit()
+def seed(database: DatabaseUtil) -> dict[str, int]:
+    with database.transaction() as s:
+        return persist_conversations(s, data, keep=3)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    from main import main
+
+    raise SystemExit(main(["seed-demo"]))

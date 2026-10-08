@@ -1,8 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from app.schemas.contact import ContactIn
-from app.schemas.conversation import ScrapedConversation
-from app.schemas.message import MessageIn
+from Models.schema import ContactIn, MessageIn, ScrapedConversation
 
 BASE_TIME = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
 

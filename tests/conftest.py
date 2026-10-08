@@ -2,47 +2,45 @@
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from psycopg2 import sql
+from psycopg2.extensions import parse_dsn
 
-from app.config.settings import Settings
-from app.db.models import Base
+from utils.database import DatabaseUtil
+from utils.settings import Settings
 
 TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:55432/whatsapp_ai_test"
+    "TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:55432/whatsapp_ai_test"
 )
-if "test" not in TEST_DATABASE_URL.rsplit("/", 1)[-1]:
+TEST_CONFIG = parse_dsn(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://", 1))
+if "test" not in TEST_CONFIG.get("dbname", ""):
     raise RuntimeError("TEST_DATABASE_URL must point at a database whose name contains 'test'")
 
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:
-    return Settings(database_url=TEST_DATABASE_URL, openai_api_key=None, api_key=None, _env_file=None)
-
-
-@pytest.fixture(scope="session")
-async def engine():  # type: ignore[no-untyped-def]
-    eng = create_async_engine(TEST_DATABASE_URL)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
-    await eng.dispose()
+    return Settings(database_url=TEST_DATABASE_URL, openai_api_key=None, _env_file=None)
 
 
 @pytest.fixture
-async def session_factory(engine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:  # type: ignore[no-untyped-def]
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
-        await conn.execute(text(f"TRUNCATE {tables} CASCADE"))
+def database() -> Iterator[DatabaseUtil]:
+    admin = DatabaseUtil(TEST_CONFIG)
+    schema = "wa_test_" + uuid.uuid4().hex
+    with admin.transaction() as s:
+        s.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    db = DatabaseUtil({**TEST_CONFIG, "options": f"-c search_path={schema}"})
+    try:
+        db.initialize()
+        yield db
+    finally:
+        with admin.transaction() as s:
+            s.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 Responder = Callable[[list[BaseMessage], list[str]], AIMessage]
