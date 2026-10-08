@@ -210,11 +210,15 @@ An external worker may POST JSON to `/webhook` with `Content-Type: application/j
 }
 ```
 
-Limits: 2 MiB per request and 500 conversations. Use stable message IDs and timezone-aware timestamps.
+Limits: 2 MiB per request and 500 conversations. The scraper sender automatically splits large extractions by
+both byte size and count; failures report how many batches arrived, and retrying deduplicates by IDs.
+A single conversation larger than 2 MiB is rejected during preflight, before sending any batches.
+Use stable message IDs and timezone-aware timestamps.
 Invalid bodies receive 422; database failures receive 503 and roll back the entire batch.
 The receiver binds to loopback by default; no token means it refuses to start.
 For non-local delivery use HTTPS via a secured reverse proxy, restrict access, and never publish the plain HTTP
-development listener directly. The sender rejects non-local HTTP URLs and does not follow redirects with credentials.
+development listener directly. Plain HTTP delivery requires a literal loopback IP (not a hostname);
+loopback delivery bypasses environment proxies. The sender does not follow redirects with credentials.
 
 "Training agents on PostgreSQL" here means giving LangGraph agents approved database tools and prompt context,
 as in AI_DATA_AGENTS, not fine-tuning an LLM on private conversations.
@@ -241,6 +245,9 @@ The judge scores correctness, relevance, groundedness, completeness and hallucin
 `final_score = .30 C + .20 R + .25 G + .15 Comp + .10 (1 − H)`.
 A score below `JUDGE_THRESHOLD` triggers feedback and at most `JUDGE_MAX_RETRIES` retries.
 Agent tools, iterations, tokens, latency and scores are persisted.
+Retained-message changes invalidate classifications, including backfilled messages. If ingestion changes a
+message snapshot while an LLM is classifying it, that result is skipped rather than saved; rerun classification.
+`--only-unclassified` excludes contacts whose stored classification is still current.
 
 ## Evaluation
 

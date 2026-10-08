@@ -1,5 +1,6 @@
 import json
 import threading
+from http.client import HTTPMessage
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -8,8 +9,9 @@ from pydantic import SecretStr
 
 from Models.schema import WebhookPayload
 from tests.factories import conversation
+from utils import webhook
 from utils.repositories import ContactRepository, MessageRepository
-from utils.webhook import MAX_BODY_BYTES, create_server, deliver
+from utils.webhook import MAX_BODY_BYTES, WebhookDeliveryError, batches, create_server, deliver, deliver_conversations
 
 
 @pytest.fixture
@@ -125,3 +127,67 @@ def test_delivery_does_not_forward_auth_on_redirect(receiver) -> None:  # type: 
         finally:
             redirect.shutdown()
             thread.join(timeout=5)
+
+
+def test_batches_respect_count_and_encoded_byte_limits(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    convs = [conversation(f"{i}@lid", "Name", None, ["hello"]) for i in range(501)]
+    count_batches = batches(convs)
+    assert [len(p.conversations) for p in count_batches] == [500, 1]
+    monkeypatch.setattr(webhook, "MAX_BODY_BYTES", 2000)
+    convs = [conversation(f"{i}@lid", "Name", None, ["你" * 200]) for i in range(5)]
+    byte_batches = batches(convs)
+    assert len(byte_batches) > 1
+    assert sum(len(p.conversations) for p in byte_batches) == 5
+    assert all(len(p.model_dump_json().encode()) <= 2000 for p in byte_batches)
+
+
+def test_oversized_conversation_fails_before_any_requests(settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(webhook, "MAX_BODY_BYTES", 1000)
+    monkeypatch.setattr(webhook, "deliver", lambda *args: pytest.fail("Preflight must reject before delivery"))
+    convs = [conversation("1@lid", "Name", None, ["small"]), conversation("2@lid", "Name", None, ["x" * 1200])]
+    with pytest.raises(ValueError, match="conversation exceeds"):
+        deliver_conversations("http://127.0.0.1:8080/webhook", convs, settings)
+
+
+def test_partial_batch_delivery_reports_retryable_progress(settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = 0
+
+    def send(*args):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise HTTPError("http://127.0.0.1/webhook", 503, "failed", HTTPMessage(), None)
+        return {"status": "accepted", "contacts_saved": 500, "messages_saved": 500}
+
+    monkeypatch.setattr(webhook, "deliver", send)
+    convs = [conversation(f"{i}@lid", "Name", None, ["a"]) for i in range(501)]
+    with pytest.raises(WebhookDeliveryError, match="after 1 of 2 batches"):
+        deliver_conversations("http://127.0.0.1:8080/webhook", convs, settings)
+
+
+def test_loopback_delivery_bypasses_environment_proxy(receiver, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    payload = WebhookPayload(conversations=[conversation("1@lid", "Name", None, ["hello"])])
+    assert deliver(receiver[0], payload, receiver[1])["status"] == "accepted"
+    with pytest.raises(ValueError, match="literal loopback"):
+        deliver("http://localhost/webhook", payload, receiver[1])
+
+
+@pytest.mark.parametrize("field,value", [("sender_name", "x" * 256), ("message_type", "x" * 31)])
+def test_webhook_rejects_db_length_violations_as_validation_errors(receiver, field, value) -> None:  # type: ignore[no-untyped-def]
+    url, settings = receiver
+    payload = WebhookPayload(conversations=[conversation("1@lid", "Name", None, ["hello"])]).model_dump(mode="json")
+    payload["conversations"][0]["messages"][0][field] = value
+    request = Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + settings.webhook_token.get_secret_value(),
+            "Content-Type": "application/json",
+        },
+    )
+    with pytest.raises(HTTPError) as error:
+        urlopen(request, timeout=3)
+    assert error.value.code == 422

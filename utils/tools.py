@@ -83,39 +83,41 @@ async def classify_conversations(
     for c, msgs, conv in await asyncio.to_thread(snapshot):
         if not msgs:
             continue
-        if (
-            only_unclassified
-            and conv
-            and conv.category
-            and conv.classified_at
-            and conv.last_message_at
-            and conv.classified_at >= conv.last_message_at
-        ):
-            out.append(
-                ClassifiedContact(
-                    contact_id=c.id,
-                    contact_name=c.contact_name,
-                    category=conv.category,
-                    action=conv.action,
-                    confidence=conv.category_confidence,
-                    reason=conv.category_reason,
+        if conv and conv.category and conv.classified_at:
+            if not only_unclassified:
+                out.append(
+                    ClassifiedContact(
+                        contact_id=c.id,
+                        contact_name=c.contact_name,
+                        category=conv.category,
+                        action=conv.action,
+                        confidence=conv.category_confidence,
+                        reason=conv.category_reason,
+                    )
                 )
-            )
             continue
         result = await classify_contact(llm, c, msgs)
 
-        def save(contact: Contact = c, classification: ConversationClassification = result) -> None:
+        def save(
+            contact: Contact = c, classification: ConversationClassification = result, snapshot: list[Message] = msgs
+        ) -> bool:
             with database.transaction() as s:
-                ContactRepository(s).set_classification(
+                repo = ContactRepository(s)
+                repo.lock(contact.id)
+                current = MessageRepository(s).recent_for_contact(contact.id, settings.max_messages_per_contact)
+                if [m.id for m in current] != [m.id for m in snapshot]:
+                    return False
+                repo.set_classification(
                     contact.id,
                     classification.category,
                     classification.action,
                     classification.confidence,
                     classification.reason,
                 )
+                return True
 
-        await asyncio.to_thread(save)
-        out.append(ClassifiedContact(contact_id=c.id, contact_name=c.contact_name, **result.model_dump()))
+        if await asyncio.to_thread(save):
+            out.append(ClassifiedContact(contact_id=c.id, contact_name=c.contact_name, **result.model_dump()))
     return out
 
 
@@ -269,8 +271,9 @@ def build_tools(database: DatabaseUtil, settings: Settings, llm: BaseChatModel |
     if llm is not None:
 
         @tool
-        async def classify_recent_conversations(days: int = 7, limit: int = 20, only_unclassified: bool = True) -> str:
-            """Classify recent conversations, store category/action/confidence and return the results."""
+        async def classify_recent_conversations(days: int = 7, limit: int = 20, only_unclassified: bool = False) -> str:
+            """Classify recent conversations and return results, reusing current categories unless messages changed.
+            only_unclassified excludes current cached results."""
             rows = await classify_conversations(
                 database,
                 settings,

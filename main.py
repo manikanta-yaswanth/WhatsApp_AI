@@ -20,6 +20,7 @@ from utils.llm_pick import LLMNotConfiguredError, build_chat_model
 from utils.logging import configure_logging
 from utils.repositories import ContactRepository, MessageRepository, QualityRepository
 from utils.settings import Settings, get_settings
+from utils.webhook import WebhookDeliveryError
 
 
 def positive_int(value: str) -> int:
@@ -85,14 +86,12 @@ async def dispatch(args: argparse.Namespace, settings: Settings) -> int:
         emit(export_graphs(args.output_dir, settings))
         return 0
     if args.command == "scrape" and args.webhook_url:
-        from Models.schema import WebhookPayload
         from scraper.whatsapp import WhatsAppScraper
-        from utils.webhook import deliver, token_value
+        from utils.webhook import deliver_conversations, token_value
 
         token_value(settings)
         output = await WhatsAppScraper(settings).scrape()
-        payload = WebhookPayload(conversations=output.result.conversations)
-        emit(await asyncio.to_thread(deliver, args.webhook_url, payload, settings))
+        emit(await asyncio.to_thread(deliver_conversations, args.webhook_url, output.result.conversations, settings))
         return 0
     database = DatabaseUtil.from_settings(settings)
     if args.command == "webhook":
@@ -194,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Invalid configuration or input. Check .env and command arguments.", file=sys.stderr)
     except NotFoundError:
         print("Contact not found.", file=sys.stderr)
+    except WebhookDeliveryError as exc:
+        print(str(exc), file=sys.stderr)
     except (OSError, RuntimeError, ValueError):
         print("Command failed. Check the database schema, browser profile or input dataset.", file=sys.stderr)
     except KeyboardInterrupt:

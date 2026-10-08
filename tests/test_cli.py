@@ -155,11 +155,11 @@ async def test_scrape_to_webhook_does_not_access_database(settings, monkeypatch)
     monkeypatch.setattr(DatabaseUtil, "transaction", lambda _: pytest.fail("Sender must not use DB"))
     delivered = []
 
-    def deliver(url, payload, settings):  # type: ignore[no-untyped-def]
-        delivered.extend(payload.conversations)
+    def deliver(url, conversations, settings):  # type: ignore[no-untyped-def]
+        delivered.extend(conversations)
         return {"status": "accepted"}
 
-    monkeypatch.setattr(webhook, "deliver", deliver)
+    monkeypatch.setattr(webhook, "deliver_conversations", deliver)
     args = argparse.Namespace(command="scrape", webhook_url="http://127.0.0.1:8080/webhook")
     assert await cli.dispatch(args, configured) == 0
     assert len(delivered) == 1

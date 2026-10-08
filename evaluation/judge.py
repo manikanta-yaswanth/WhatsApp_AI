@@ -5,7 +5,7 @@ from pathlib import Path
 from evaluation.datasets import DEFAULT_DATASET, load_dataset
 from evaluation.metrics import summarize_evaluations
 from Models.records import Evaluation, EvaluationRun
-from utils.agent_runner import AgentService
+from utils.agent_runner import AgentRunError, AgentService
 from utils.logging import get_logger
 from utils.repositories import RunRepository
 
@@ -28,19 +28,22 @@ async def run_evaluation(
     error = None
     try:
         for question in load_dataset(dataset):
+            failed_id = None
             try:
                 response, state = await service.run(
                     question.question, judge=True, expected=question.reference, record_evaluation=False
                 )
-            except RuntimeError:
+            except AgentRunError as exc:
+                failed_id = exc.run_id
                 response, state = None, {}
 
-            def save(response, state, question) -> None:  # type: ignore[no-untyped-def]
+            def save(response, state, question, failed_id) -> None:  # type: ignore[no-untyped-def]
                 with service.database.transaction() as s:
                     repo = RunRepository(s)
                     if response is None:
                         row = Evaluation(
                             evaluation_run_id=run_id,
+                            agent_run_id=failed_id,
                             question=question.question,
                             expected=question.reference,
                             expected_tools=question.expected_tools or None,
@@ -58,7 +61,7 @@ async def run_evaluation(
                         )
                     repo.save_evaluation(row)
 
-            await asyncio.to_thread(save, response, state, question)
+            await asyncio.to_thread(save, response, state, question, failed_id)
     except Exception as exc:  # noqa: BLE001 - persist evaluation failure
         error = type(exc).__name__
 

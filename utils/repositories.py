@@ -133,6 +133,16 @@ class ContactRepository:
             (uuid.uuid4(), cid, category, action, confidence, reason),
         )
 
+    def lock(self, cid: uuid.UUID) -> None:
+        self.session.execute("SELECT id FROM contacts WHERE id=%s FOR UPDATE", (cid,))
+
+    def invalidate_classification(self, cid: uuid.UUID) -> None:
+        self.session.execute(
+            """UPDATE conversations SET category=NULL, action=NULL, category_confidence=NULL,
+               category_reason=NULL, classified_at=NULL WHERE contact_id=%s""",
+            (cid,),
+        )
+
 
 class MessageRepository:
     def __init__(self, session: SQLSession) -> None:

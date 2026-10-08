@@ -24,9 +24,12 @@ def persist_conversations(session: SQLSession, conversations: list[ScrapedConver
     for conv in conversations:
         cid, inserted = contacts.upsert(conv.contact)
         stats["contacts_saved"] += int(inserted)
+        before = [m.id for m in messages.recent_for_contact(cid, keep)]
         contacts.upsert_conversation(cid, conv.unread_count, conv.last_message_at)
         stats["messages_saved"] += messages.insert_new(cid, conv.newest(keep))
         stats["messages_pruned"] += messages.prune(cid, keep)
+        if before != [m.id for m in messages.recent_for_contact(cid, keep)]:
+            contacts.invalidate_classification(cid)
     return stats
 
 

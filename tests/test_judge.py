@@ -34,3 +34,26 @@ async def test_evaluation_run_stores_metrics(database, settings, scripted, tmp_p
     with database.transaction() as s:
         rows = RunRepository(s).evaluations()
     assert sorted(r.final_score for r in rows if r.final_score is not None) == [0.8, 0.9]
+
+
+async def test_failed_questions_keep_distinct_agent_run_ids(
+    database, settings, scripted, tmp_path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise ValueError("private content must not be logged")
+
+    llm = scripted(make_responder("contact", [], "", []))
+    service = AgentService(settings, database, llm)
+    monkeypatch.setattr(service.graph, "ainvoke", fail)
+    dataset = tmp_path / "fail.json"
+    dataset.write_text(json.dumps([{"question": "Same question"}] * 2))
+    run = await run_evaluation(service, await create_evaluation_run(service, dataset), dataset)
+    with database.transaction() as s:
+        repo = RunRepository(s)
+        rows = repo.evaluations(run.id)
+        assert len(rows) == 2 and all(r.agent_run_id is not None for r in rows)
+        assert rows[0].agent_run_id != rows[1].agent_run_id
+        for row in rows:
+            assert row.agent_run_id is not None
+            agent = repo.get_agent(row.agent_run_id)
+            assert agent.status == "failed" and not row.schema_compliant

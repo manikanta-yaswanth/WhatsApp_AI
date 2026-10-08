@@ -30,6 +30,12 @@ class NotFoundError(LookupError):
     pass
 
 
+class AgentRunError(RuntimeError):
+    def __init__(self, run_id: uuid.UUID, error: str) -> None:
+        super().__init__(error)
+        self.run_id = run_id
+
+
 class AgentService:
     def __init__(
         self,
@@ -102,7 +108,7 @@ class AgentService:
             completion_tokens=run.completion_tokens,
         )
         if error:
-            raise RuntimeError(error)
+            raise AgentRunError(run.id, error)
         response = AgentResponse(
             run_id=run.id,
             intent=run.intent,

@@ -58,8 +58,8 @@ SenderType = Literal["contact", "me", "group_member", "system"]
 class MessageIn(BaseModel):
     whatsapp_message_id: str = Field(min_length=1, max_length=255)
     sender_type: SenderType
-    sender_name: str | None = None
-    message_type: str = "text"
+    sender_name: str | None = Field(default=None, max_length=255)
+    message_type: str = Field(default="text", min_length=1, max_length=30)
     message_text: str | None = None
     message_timestamp: datetime
 

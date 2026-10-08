@@ -1,21 +1,27 @@
 """Optional local webhook ingress; no FastAPI or arbitrary SQL."""
 
 import hmac
+import ipaddress
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 import psycopg2
 from pydantic import ValidationError
 
-from Models.schema import WebhookPayload
+from Models.schema import ScrapedConversation, WebhookPayload
 from utils.database import DatabaseUtil
 from utils.feed_db import persist_conversations
 from utils.settings import Settings
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+class WebhookDeliveryError(RuntimeError):
+    pass
 
 
 def token_value(settings: Settings) -> str:
@@ -87,8 +93,12 @@ def deliver(url: str, payload: WebhookPayload, settings: Settings) -> dict:
     target = urlsplit(url)
     if target.scheme not in {"http", "https"} or not target.hostname or target.username or target.password:
         raise ValueError("Use an HTTP(S) webhook URL without embedded credentials")
-    if target.scheme == "http" and target.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("Use HTTPS for non-local webhook delivery")
+    try:
+        loopback = ipaddress.ip_address(target.hostname).is_loopback
+    except ValueError:
+        loopback = False
+    if target.scheme == "http" and not loopback:
+        raise ValueError("Use HTTPS except for a literal loopback IP")
     body = payload.model_dump_json().encode("utf-8")
     if len(body) > MAX_BODY_BYTES:
         raise ValueError("Webhook batch exceeds 2 MiB; reduce MAX_CHATS_PER_SCRAPE")
@@ -98,5 +108,42 @@ def deliver(url: str, payload: WebhookPayload, settings: Settings) -> dict:
         method="POST",
         headers={"Authorization": f"Bearer {token_value(settings)}", "Content-Type": "application/json"},
     )
-    with build_opener(NoRedirect()).open(request, timeout=30) as response:
+    handlers = [NoRedirect(), ProxyHandler({})] if loopback else [NoRedirect()]
+    with build_opener(*handlers).open(request, timeout=30) as response:
         return json.load(response)
+
+
+def batches(conversations: list[ScrapedConversation]) -> list[WebhookPayload]:
+    result = []
+    pending: list[ScrapedConversation] = []
+    size = len(b'{"conversations":[]}')
+    for conv in conversations:
+        encoded_size = len(conv.model_dump_json().encode("utf-8"))
+        if encoded_size + len(b'{"conversations":[]}') > MAX_BODY_BYTES:
+            raise ValueError("A conversation exceeds the webhook body limit; reduce retained messages or message size")
+        if pending and (len(pending) == 500 or size + encoded_size + 1 > MAX_BODY_BYTES):
+            result.append(WebhookPayload(conversations=pending))
+            pending, size = [], len(b'{"conversations":[]}')
+        size += encoded_size + int(bool(pending))
+        pending.append(conv)
+    if pending:
+        result.append(WebhookPayload(conversations=pending))
+    return result
+
+
+def deliver_conversations(url: str, conversations: list[ScrapedConversation], settings: Settings) -> dict:
+    payloads = batches(conversations)
+    stats = {"batches_delivered": 0, "contacts_saved": 0, "messages_saved": 0, "messages_pruned": 0}
+    for index, payload in enumerate(payloads):
+        try:
+            response = deliver(url, payload, settings)
+            if response.get("status") != "accepted":
+                raise WebhookDeliveryError("Receiver did not acknowledge delivery")
+        except (URLError, OSError, json.JSONDecodeError, WebhookDeliveryError) as exc:
+            raise WebhookDeliveryError(
+                f"Webhook failed after {index} of {len(payloads)} batches; retry the scrape safely (IDs deduplicate)"
+            ) from exc
+        stats["batches_delivered"] += 1
+        for key in ("contacts_saved", "messages_saved", "messages_pruned"):
+            stats[key] += response.get(key, 0)
+    return {"status": "accepted", **stats}
