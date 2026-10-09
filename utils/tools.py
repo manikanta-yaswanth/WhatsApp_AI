@@ -220,7 +220,7 @@ def build_tools(database: DatabaseUtil, settings: Settings, llm: BaseChatModel |
                 result["matching"] = repo.count(has_phone=has_phone, phone_prefix=phone_prefix)
             if by_country:
                 breakdown: dict[str, int] = {}
-                for row in s.all("SELECT phone_number FROM contacts WHERE phone_number IS NOT NULL"):
+                for row in s.all("SELECT phone_number FROM contact_records WHERE phone_number IS NOT NULL"):
                     region = region_of(row["phone_number"]) or "unknown"
                     breakdown[region] = breakdown.get(region, 0) + 1
                 result["by_country"] = dict(sorted(breakdown.items(), key=lambda item: -item[1]))
@@ -234,11 +234,14 @@ def build_tools(database: DatabaseUtil, settings: Settings, llm: BaseChatModel |
             msgs = MessageRepository(s)
             top = s.all(
                 """SELECT c.contact_name AS name, count(*) AS messages, max(m.message_timestamp) AS last_message_at
-                   FROM contacts c JOIN messages m ON m.contact_id=c.id WHERE m.message_timestamp >= %s
-                   GROUP BY c.id ORDER BY max(m.message_timestamp) DESC LIMIT 10""",
+                   FROM contact_records c JOIN message_records m ON m.contact_id=c.id
+                   WHERE m.message_timestamp >= %s
+                   GROUP BY c.id, c.contact_name ORDER BY max(m.message_timestamp) DESC LIMIT 10""",
                 (since,),
             )
-            cats = s.all("SELECT category, count(*) n FROM conversations WHERE category IS NOT NULL GROUP BY category")
+            cats = s.all(
+                "SELECT category, count(*) n FROM conversation_records WHERE category IS NOT NULL GROUP BY category"
+            )
             return _dump(
                 {
                     "messages_stored": msgs.count(),

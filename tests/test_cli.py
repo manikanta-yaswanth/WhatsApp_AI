@@ -191,6 +191,6 @@ async def test_direct_scrape_rolls_back_all_conversations_on_storage_failure(dat
     assert calls == 2 and result.status == "failed"
     with database.transaction() as session:
         assert ContactRepository(session).count() == MessageRepository(session).count() == 0
-        assert session.scalar("SELECT COUNT(*) FROM conversations") == 0
+        assert session.scalar("SELECT COUNT(*) FROM conversation_records") == 0
         saved = RunRepository(session).get_scrape(run.id)
         assert saved is not None and saved.status == "failed"

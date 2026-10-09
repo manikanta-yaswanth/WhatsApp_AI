@@ -44,3 +44,25 @@ async def test_count_filters_phone(database) -> None:  # type: ignore[no-untyped
         assert repo.count(has_phone=True) == 2
         assert repo.count(phone_prefix="1") == 1
         assert repo.count(phone_prefix="+91") == 1
+
+
+def test_contact_details_and_newest_messages_share_one_row(database) -> None:  # type: ignore[no-untyped-def]
+    conv = conversation("14155550123@c.us", "John", "+14155550123", ["a", "b", "c", "d"])
+    with database.transaction() as s:
+        persist_conversations(s, [conv], 3)
+        row = s.one("SELECT * FROM whatsapp_contacts")
+        assert row["contact_name"] == "John" and row["phone_number"] == "+14155550123"
+        assert row["whatsapp_id"] == "14155550123@c.us"
+        assert [m["message_text"] for m in row["recent_messages"]] == ["d", "c", "b"]
+        assert all(m["id"] and m["whatsapp_message_id"] and m["sender_type"] for m in row["recent_messages"])
+        ids = [m["id"] for m in row["recent_messages"]]
+        assert persist_conversations(s, [conv], 3)["messages_saved"] == 0
+        assert [m["id"] for m in s.one("SELECT recent_messages FROM whatsapp_contacts")["recent_messages"]] == ids
+
+
+def test_contact_without_messages_has_an_empty_array(database) -> None:  # type: ignore[no-untyped-def]
+    with database.transaction() as s:
+        persist_conversations(s, [conversation("empty@lid", None, None, [])], 3)
+        row = s.one("SELECT * FROM whatsapp_contacts")
+        assert row["contact_name"] is None and row["phone_number"] is None and row["recent_messages"] == []
+        assert ContactRepository(s).search()[1][0][1] == 0

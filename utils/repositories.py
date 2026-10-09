@@ -18,11 +18,11 @@ class ContactRepository:
 
     def upsert(self, contact: ContactIn) -> tuple[uuid.UUID, bool]:
         row = self.session.one(
-            """INSERT INTO contacts (id, whatsapp_id, contact_name, phone_number, is_group)
+            """INSERT INTO whatsapp_contacts (id, whatsapp_id, contact_name, phone_number, is_group)
                VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT (whatsapp_id) DO UPDATE SET
-                 contact_name = coalesce(EXCLUDED.contact_name, contacts.contact_name),
-                 phone_number = coalesce(EXCLUDED.phone_number, contacts.phone_number),
+                 contact_name = coalesce(EXCLUDED.contact_name, whatsapp_contacts.contact_name),
+                 phone_number = coalesce(EXCLUDED.phone_number, whatsapp_contacts.phone_number),
                  is_group = EXCLUDED.is_group, updated_at = now()
                RETURNING id, (xmax = 0) AS inserted""",
             (uuid.uuid4(), contact.whatsapp_id, contact.contact_name, contact.phone_number, contact.is_group),
@@ -31,16 +31,14 @@ class ContactRepository:
 
     def upsert_conversation(self, cid: uuid.UUID, unread: int, last: datetime | None) -> None:
         self.session.execute(
-            """INSERT INTO conversations (id, contact_id, unread_count, last_message_at, last_scraped_at)
-               VALUES (%s, %s, %s, %s, now()) ON CONFLICT (contact_id) DO UPDATE SET
-               unread_count = EXCLUDED.unread_count,
-               last_message_at = greatest(conversations.last_message_at, EXCLUDED.last_message_at),
-               last_scraped_at = now()""",
-            (uuid.uuid4(), cid, unread, last),
+            """UPDATE whatsapp_contacts SET conversation_id=coalesce(conversation_id, %s),
+               unread_count=%s, last_message_at=greatest(last_message_at, %s), last_scraped_at=now()
+               WHERE id=%s""",
+            (uuid.uuid4(), unread, last, cid),
         )
 
     def get(self, cid: uuid.UUID) -> Contact | None:
-        rows = self.session.all("SELECT * FROM contacts WHERE id = %s", (cid,))
+        rows = self.session.all("SELECT * FROM contact_records WHERE id = %s", (cid,))
         return Contact.model_validate(rows[0]) if rows else None
 
     @staticmethod
@@ -83,12 +81,12 @@ class ContactRepository:
         offset: int = 0,
     ) -> tuple[int, list[tuple[Contact, int, datetime | None, str | None]]]:
         where, params = self._filters(name, phone, phone_prefix, has_phone, is_group, category)
-        join = " FROM contacts c LEFT JOIN conversations v ON v.contact_id = c.id"
+        join = " FROM contact_records c LEFT JOIN conversation_records v ON v.contact_id = c.id"
         total = self.session.scalar("SELECT count(*)" + join + where, params)
         rows = self.session.all(
             """SELECT c.*, v.category,
-               (SELECT count(*) FROM messages m WHERE m.contact_id=c.id) AS message_count,
-               (SELECT max(message_timestamp) FROM messages m WHERE m.contact_id=c.id) AS last_message_at"""
+               (SELECT count(*) FROM message_records m WHERE m.contact_id=c.id) AS message_count,
+               (SELECT max(message_timestamp) FROM message_records m WHERE m.contact_id=c.id) AS last_message_at"""
             + join
             + where
             + " ORDER BY coalesce(v.last_message_at, c.created_at) DESC, c.id LIMIT %s OFFSET %s",
@@ -105,7 +103,7 @@ class ContactRepository:
         phone_prefix: str | None = None,
     ) -> int:
         where, params = self._filters(is_group=is_group, has_phone=has_phone, phone_prefix=phone_prefix)
-        return self.session.scalar("SELECT count(*) FROM contacts c" + where, params)
+        return self.session.scalar("SELECT count(*) FROM contact_records c" + where, params)
 
     def find_by_name_or_id(self, ref: str) -> Contact | None:
         try:
@@ -113,33 +111,31 @@ class ContactRepository:
         except ValueError:
             pass
         rows = self.session.all(
-            """SELECT * FROM contacts WHERE contact_name ILIKE %s OR phone_number ILIKE %s OR whatsapp_id=%s
+            """SELECT * FROM contact_records WHERE contact_name ILIKE %s OR phone_number ILIKE %s OR whatsapp_id=%s
                ORDER BY updated_at DESC LIMIT 1""",
             (f"%{ref}%", f"%{ref}%", ref),
         )
         return Contact.model_validate(rows[0]) if rows else None
 
     def get_conversation(self, cid: uuid.UUID) -> Conversation | None:
-        rows = self.session.all("SELECT * FROM conversations WHERE contact_id=%s", (cid,))
+        rows = self.session.all("SELECT * FROM conversation_records WHERE contact_id=%s", (cid,))
         return Conversation.model_validate(rows[0]) if rows else None
 
     def set_classification(self, cid: uuid.UUID, category: str, action: str, confidence: float, reason: str) -> None:
         self.session.execute(
-            """INSERT INTO conversations
-               (id, contact_id, category, action, category_confidence, category_reason, classified_at)
-               VALUES (%s, %s, %s, %s, %s, %s, now()) ON CONFLICT (contact_id) DO UPDATE SET
-               category=EXCLUDED.category, action=EXCLUDED.action, category_confidence=EXCLUDED.category_confidence,
-               category_reason=EXCLUDED.category_reason, classified_at=now()""",
-            (uuid.uuid4(), cid, category, action, confidence, reason),
+            """UPDATE whatsapp_contacts SET conversation_id=coalesce(conversation_id, %s),
+               category=%s, action=%s, category_confidence=%s, category_reason=%s, classified_at=now()
+               WHERE id=%s""",
+            (uuid.uuid4(), category, action, confidence, reason, cid),
         )
 
     def lock(self, cid: uuid.UUID) -> None:
-        self.session.execute("SELECT id FROM contacts WHERE id=%s FOR UPDATE", (cid,))
+        self.session.execute("SELECT id FROM whatsapp_contacts WHERE id=%s FOR UPDATE", (cid,))
 
     def invalidate_classification(self, cid: uuid.UUID) -> None:
         self.session.execute(
-            """UPDATE conversations SET category=NULL, action=NULL, category_confidence=NULL,
-               category_reason=NULL, classified_at=NULL WHERE contact_id=%s""",
+            """UPDATE whatsapp_contacts SET category=NULL, action=NULL, category_confidence=NULL,
+               category_reason=NULL, classified_at=NULL WHERE id=%s""",
             (cid,),
         )
 
@@ -149,40 +145,51 @@ class MessageRepository:
         self.session = session
 
     def insert_new(self, cid: uuid.UUID, messages: list[MessageIn]) -> int:
-        saved = 0
-        for m in messages:
-            saved += self.session.execute(
-                """INSERT INTO messages (id, contact_id, whatsapp_message_id, sender_type, sender_name,
-                   message_type, message_text, message_timestamp) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (whatsapp_message_id) DO NOTHING""",
-                (
-                    uuid.uuid4(),
-                    cid,
-                    m.whatsapp_message_id,
-                    m.sender_type,
-                    m.sender_name,
-                    m.message_type,
-                    m.message_text,
-                    m.message_timestamp,
-                ),
+        if not messages:
+            return 0
+        ids = sorted({m.whatsapp_message_id for m in messages})
+        # Serialize message-ID checks across contacts now that messages live inside JSONB.
+        for mid in ids:
+            self.session.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (mid,))
+        row = self.session.one("SELECT recent_messages FROM whatsapp_contacts WHERE id=%s FOR UPDATE", (cid,))
+        existing = {
+            r["whatsapp_message_id"]
+            for r in self.session.all(
+                "SELECT whatsapp_message_id FROM message_records WHERE whatsapp_message_id=ANY(%s)", (ids,)
             )
-        return saved
+        }
+        records = row["recent_messages"]
+        new = []
+        for m in messages:
+            if m.whatsapp_message_id not in existing:
+                new.append({**m.model_dump(mode="json"), "id": str(uuid.uuid4()), "scraped_at": utcnow().isoformat()})
+                existing.add(m.whatsapp_message_id)
+        if new:
+            self.session.execute(
+                "UPDATE whatsapp_contacts SET recent_messages=%s WHERE id=%s", (Json(records + new), cid)
+            )
+        return len(new)
 
     def prune(self, cid: uuid.UUID, keep: int) -> int:
         if keep < 1:
             raise ValueError("keep must be positive")
-        return self.session.execute(
-            """DELETE FROM messages WHERE contact_id=%s AND id NOT IN (
-               SELECT id FROM messages WHERE contact_id=%s
-               ORDER BY message_timestamp DESC, scraped_at DESC, id DESC LIMIT %s)""",
-            (cid, cid, keep),
+        row = self.session.one("SELECT recent_messages FROM whatsapp_contacts WHERE id=%s FOR UPDATE", (cid,))
+        records = row["recent_messages"]
+        ordered = sorted(
+            (Message.model_validate({**m, "contact_id": cid}) for m in records),
+            key=lambda m: (m.message_timestamp, m.scraped_at, m.id),
+            reverse=True,
         )
+        retained = [m.model_dump(mode="json", exclude={"contact_id"}) for m in ordered[:keep]]
+        self.session.execute("UPDATE whatsapp_contacts SET recent_messages=%s WHERE id=%s", (Json(retained), cid))
+        return max(0, len(records) - keep)
 
     def recent_for_contact(self, cid: uuid.UUID, limit: int = 3) -> list[Message]:
         return [
             Message.model_validate(r)
             for r in self.session.all(
-                "SELECT * FROM messages WHERE contact_id=%s ORDER BY message_timestamp DESC, id DESC LIMIT %s",
+                """SELECT * FROM message_records WHERE contact_id=%s
+                   ORDER BY message_timestamp DESC, scraped_at DESC, id DESC LIMIT %s""",
                 (cid, max(1, min(limit, 500))),
             )
         ]
@@ -194,8 +201,8 @@ class MessageRepository:
         per_contact: int = 3,
     ) -> list[tuple[Contact, list[Message]]]:
         rows = self.session.all(
-            """SELECT c.* FROM contacts c JOIN (
-               SELECT contact_id, max(message_timestamp) last_at FROM messages GROUP BY contact_id
+            """SELECT c.* FROM contact_records c JOIN (
+               SELECT contact_id, max(message_timestamp) last_at FROM message_records GROUP BY contact_id
                HAVING (%s::timestamptz IS NULL OR max(message_timestamp) >= %s)
                ) m ON c.id=m.contact_id ORDER BY m.last_at DESC, c.id LIMIT %s""",
             (since, since, max(1, min(limit, 500))),
@@ -210,7 +217,7 @@ class MessageRepository:
             where = f"({where}) AND message_timestamp >= %s"
             params.append(utcnow() - timedelta(days=max(0, days)))
         rows = self.session.all(
-            "SELECT * FROM messages WHERE " + where + " ORDER BY message_timestamp DESC, id DESC LIMIT %s",
+            "SELECT * FROM message_records WHERE " + where + " ORDER BY message_timestamp DESC, id DESC LIMIT %s",
             [*params, max(1, min(limit, 500))],
         )
         out = []
@@ -222,7 +229,7 @@ class MessageRepository:
 
     def count(self, since: datetime | None = None) -> int:
         return self.session.scalar(
-            "SELECT count(*) FROM messages WHERE (%s::timestamptz IS NULL OR message_timestamp >= %s)",
+            "SELECT count(*) FROM message_records WHERE (%s::timestamptz IS NULL OR message_timestamp >= %s)",
             (since, since),
         )
 
@@ -233,36 +240,40 @@ class QualityRepository:
 
     def report(self, max_messages_per_contact: int) -> dict[str, Any]:
         count = self.session.scalar
-        contacts = count("SELECT count(*) FROM contacts")
-        messages = count("SELECT count(*) FROM messages")
-        phones = self.session.all("SELECT phone_number FROM contacts WHERE phone_number IS NOT NULL")
+        contacts = count("SELECT count(*) FROM contact_records")
+        messages = count("SELECT count(*) FROM message_records")
+        phones = self.session.all("SELECT phone_number FROM contact_records WHERE phone_number IS NOT NULL")
         issues = {
             "missing_names": count(
-                "SELECT count(*) FROM contacts WHERE contact_name IS NULL OR btrim(contact_name)=''"
+                "SELECT count(*) FROM contact_records WHERE contact_name IS NULL OR btrim(contact_name)=''"
             ),
-            "missing_phone_numbers": count("SELECT count(*) FROM contacts WHERE phone_number IS NULL AND NOT is_group"),
+            "missing_phone_numbers": count(
+                "SELECT count(*) FROM contact_records WHERE phone_number IS NULL AND NOT is_group"
+            ),
             "invalid_phone_numbers": sum(normalize_phone(r["phone_number"]) != r["phone_number"] for r in phones),
             "duplicate_contacts": int(
                 count(
-                    "SELECT coalesce(sum(n-1),0) FROM (SELECT count(*) n FROM contacts "
+                    "SELECT coalesce(sum(n-1),0) FROM (SELECT count(*) n FROM contact_records "
                     "WHERE phone_number IS NOT NULL GROUP BY phone_number HAVING count(*)>1) d"
                 )
             ),
             "duplicate_messages": int(
                 count(
-                    "SELECT coalesce(sum(n-1),0) FROM (SELECT count(*) n FROM messages "
+                    "SELECT coalesce(sum(n-1),0) FROM (SELECT count(*) n FROM message_records "
                     "GROUP BY contact_id,sender_type,message_timestamp,message_text HAVING count(*)>1) d"
                 )
             ),
             "invalid_timestamps": count(
-                "SELECT count(*) FROM messages WHERE message_timestamp>now()+interval '5 minutes'"
+                "SELECT count(*) FROM message_records WHERE message_timestamp>now()+interval '5 minutes'"
             ),
             "contacts_over_message_limit": count(
-                "SELECT count(*) FROM (SELECT contact_id FROM messages GROUP BY contact_id HAVING count(*)>%s) d",
+                "SELECT count(*) FROM (SELECT contact_id FROM message_records "
+                "GROUP BY contact_id HAVING count(*)>%s) d",
                 (max_messages_per_contact,),
             ),
             "empty_text_messages": count(
-                "SELECT count(*) FROM messages WHERE message_type='text' AND (message_text IS NULL OR message_text='')"
+                """SELECT count(*) FROM message_records WHERE message_type='text'
+                   AND (message_text IS NULL OR message_text='')"""
             ),
         }
         penalized = sum(v for k, v in issues.items() if k != "missing_phone_numbers")

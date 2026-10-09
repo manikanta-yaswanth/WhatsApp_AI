@@ -131,3 +131,12 @@ async def test_classify_tool_stores_category(database, settings, scripted) -> No
     tools = build_tools(database, settings)
     found = json.loads(await tools["search_contacts"].ainvoke({"category": "meeting_request"}))
     assert found["total_matches"] == 2
+
+
+async def test_analytics_tool_reads_the_single_table_projections(database, settings) -> None:  # type: ignore[no-untyped-def]
+    await _seed(database)
+    tools = build_tools(database, settings)
+    stats = json.loads(await tools["get_message_stats"].ainvoke({"days": 10000}))
+    assert stats["messages_stored"] == stats["messages_last_10000_days"] == 2
+    assert {r["name"] for r in stats["most_recent_active_contacts"]} == {"John Smith", "Priya"}
+    assert stats["categories"] == {} and stats["recent_scrape_runs"] == []

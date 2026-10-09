@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from tests.factories import BASE_TIME, conversation
@@ -30,3 +31,38 @@ async def test_search_and_recent_conversations(database) -> None:  # type: ignor
     assert [c.contact_name for _, c in hits] == ["A"]
     assert [c.contact_name for c, _ in recent] == ["B", "A"]
     assert [m.message_text for m in recent[1][1]] == ["sure", "can we schedule a meeting"]
+
+
+def test_concurrent_contacts_do_not_duplicate_a_global_message_id(database) -> None:  # type: ignore[no-untyped-def]
+    convs = [
+        conversation("1@lid", "A", None, ["same"], prefix="shared"),
+        conversation("2@lid", "B", None, ["same"], prefix="shared"),
+    ]
+
+    def persist(conv):  # type: ignore[no-untyped-def]
+        with database.transaction() as s:
+            return persist_conversations(s, [conv], 3)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(persist, convs))
+    assert sum(r["messages_saved"] for r in results) == 1
+    with database.transaction() as s:
+        assert MessageRepository(s).count() == 1
+        assert s.scalar("SELECT count(*) FROM whatsapp_contacts") == 2
+
+
+def test_concurrent_updates_to_one_contact_merge_without_losing_messages(database) -> None:  # type: ignore[no-untyped-def]
+    convs = [
+        conversation("1@lid", "A", None, ["first"], prefix="first"),
+        conversation("1@lid", "A", None, ["second"], prefix="second", start=BASE_TIME + timedelta(hours=1)),
+    ]
+
+    def persist(conv):  # type: ignore[no-untyped-def]
+        with database.transaction() as s:
+            return persist_conversations(s, [conv], 3)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(persist, convs))
+    with database.transaction() as s:
+        row = s.one("SELECT recent_messages FROM whatsapp_contacts")
+        assert [m["message_text"] for m in row["recent_messages"]] == ["second", "first"]
