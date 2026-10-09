@@ -117,6 +117,7 @@ BEGIN
                v.category, v.category_confidence, v.category_reason, v.action, v.classified_at
         FROM contacts c LEFT JOIN conversations v ON v.contact_id = c.id
         ON CONFLICT DO NOTHING;
+        PERFORM set_config('whatsapp.legacy_migrated', 'true', true);
     END IF;
 END
 $migration$;

@@ -113,6 +113,32 @@ def test_private_schema_isolated_idempotent_and_rls_enabled(database: DatabaseUt
             s.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
+def test_unrelated_same_named_table_keeps_its_existing_grants(database: DatabaseUtil) -> None:
+    with database.transaction() as s:
+        s.execute("CREATE TABLE messages (unrelated_id integer PRIMARY KEY, note text)")
+        s.execute("INSERT INTO messages VALUES (1, 'not a WhatsApp message')")
+        s.execute("GRANT SELECT ON messages TO PUBLIC")
+    database.initialize()
+    with database.transaction() as s:
+        assert s.scalar("SELECT note FROM messages") == "not a WhatsApp message"
+        assert (
+            s.scalar(
+                """SELECT count(*) FROM pg_class c,
+               LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+               WHERE c.relnamespace=current_schema()::regnamespace
+                 AND c.relname='messages' AND a.grantee=0 AND a.privilege_type='SELECT'"""
+            )
+            == 1
+        )
+        assert (
+            s.scalar(
+                "SELECT relrowsecurity FROM pg_class "
+                "WHERE relnamespace=current_schema()::regnamespace AND relname='messages'"
+            )
+            is False
+        )
+
+
 def test_connection_commit_rollback_and_close(database: DatabaseUtil) -> None:
     with pytest.raises(RuntimeError):
         with database.transaction() as s:
