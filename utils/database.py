@@ -43,7 +43,16 @@ class DatabaseUtil:
             session.execute(schema.read_text(encoding="utf-8"))
             namespace = (self._schema,) if self._schema else ()
             tables = ("whatsapp_contacts", "scrape_runs", "agent_runs", "evaluation_runs", "evaluations")
-            for table in tables:
+            legacy_tables = [
+                row["relname"]
+                for row in session.all(
+                    """SELECT relname FROM pg_class
+                       WHERE relnamespace=current_schema()::regnamespace
+                         AND relname=ANY(%s) AND relkind IN ('r','p')""",
+                    (["contacts", "conversations", "messages"],),
+                )
+            ]
+            for table in (*tables, *legacy_tables):
                 session.execute(
                     sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(*namespace, table))
                 )
@@ -54,8 +63,8 @@ class DatabaseUtil:
                     (["anon", "authenticated", "service_role"],),
                 )
             ]
-            # Owner-backed views must not bypass table RLS for API roles.
-            for name in (*tables, "contact_records", "conversation_records", "message_records"):
+            # Owner-backed views and preserved legacy snapshots must not expose chats to API roles.
+            for name in (*tables, *legacy_tables, "contact_records", "conversation_records", "message_records"):
                 session.execute(
                     sql.SQL("REVOKE ALL ON TABLE {} FROM {}").format(
                         sql.Identifier(*namespace, name), sql.SQL(",").join(roles)

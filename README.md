@@ -143,8 +143,8 @@ Do not disable SSL to work around connection errors.
 
 **Privacy:** keep `whatsapp_demo` and `whatsapp_private` out of the Supabase Data API's exposed schemas.
 Do not grant `anon`/`authenticated` access to them. This CLI needs no Data API exposure.
-`init-db` enables RLS on the five application tables and removes public/API-role grants from those tables
-and the three record views in the selected schema. No anonymous-access policies are added.
+`init-db` enables RLS on the five application tables and any retained legacy chat tables, and removes
+public/API-role grants from those tables and the three record views. No anonymous-access policies are added.
 Use the table-owning database role (normally `postgres`) for this trusted backend CLI.
 Views can run with their owner's permissions; do not expose them just because underlying tables have RLS.
 These restrictions apply only to this application's configured schema, not unrelated tables/settings.
@@ -381,7 +381,10 @@ extract into a fresh folder instead, then restore only your private configuratio
 `messages` tables when all three exist. It preserves contact/message UUIDs, saved messages and classifications.
 Existing operational runs/evaluations and any `alembic_version` marker remain.
 Rerunning initialization does not overwrite newer single-table rows with stale legacy data.
-Legacy tables are retained as untouched snapshots; this version no longer writes to them.
+Legacy tables retain their rows as snapshots; `init-db` enables RLS and removes public/API-role grants
+on those tables, but does not change their data. This version no longer writes to them.
+If migrating an existing Supabase project, first remove the old schema from the exposed Data API schemas.
+Audit any other custom views/backups yourself; `init-db` protects only this application's known objects.
 Saved legacy messages are copied without truncation; the next scrape applies the configured retention limit to that contact.
 Do not run old and new versions against this database simultaneously.
 

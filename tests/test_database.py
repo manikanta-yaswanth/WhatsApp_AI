@@ -213,9 +213,30 @@ def test_legacy_migration_preserves_messages_ids_categories_and_backups(database
                    VALUES (%s,%s,%s,'contact',NULL,'text',%s,%s,now())""",
                 (mid, cid, f"legacy-{i}", f"old {i}", BASE_TIME),
             )
+        for table in ("contacts", "conversations", "messages"):
+            s.execute(sql.SQL("GRANT SELECT ON {} TO PUBLIC").format(sql.Identifier(table)))
     database.initialize()
     database.initialize()
     with database.transaction() as s:
+        assert all(
+            r["relrowsecurity"]
+            for r in s.all(
+                """SELECT relrowsecurity FROM pg_class
+                   WHERE relnamespace=current_schema()::regnamespace
+                     AND relname=ANY(%s)""",
+                (["contacts", "conversations", "messages"],),
+            )
+        )
+        assert (
+            s.scalar(
+                """SELECT count(*) FROM pg_class c,
+               LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+               WHERE c.relnamespace=current_schema()::regnamespace
+                 AND c.relname=ANY(%s) AND a.grantee=0""",
+                (["contacts", "conversations", "messages"],),
+            )
+            == 0
+        )
         contact = ContactRepository(s).get(cid)
         conv = ContactRepository(s).get_conversation(cid)
         assert contact is not None and contact.contact_name == "Original"
