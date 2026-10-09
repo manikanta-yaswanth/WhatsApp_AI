@@ -13,6 +13,7 @@ from tests.factories import conversation
 from tests.test_agents import make_responder
 from utils.database import DatabaseUtil
 from utils.feed_db import ScrapeService
+from utils.repositories import ContactRepository, MessageRepository, RunRepository
 
 
 class FakeScraper:
@@ -123,7 +124,8 @@ def test_help_runs_from_another_directory_without_configuration(tmp_path: Path) 
     result = subprocess.run(
         [sys.executable, str(root / "main.py"), "--help"], cwd=tmp_path, capture_output=True, text=True, check=False
     )
-    assert result.returncode == 0 and "init-db" in result.stdout
+    assert result.returncode == 0 and "init-db" in result.stdout and "scrape" in result.stdout
+    assert "webhook" not in result.stdout
 
 
 async def test_scrape_failure_is_recorded(database, settings) -> None:  # type: ignore[no-untyped-def]
@@ -142,62 +144,53 @@ def test_missing_contact_summary_returns_nonzero(run_cli, capsys) -> None:  # ty
     assert "Contact not found" in capsys.readouterr().err
 
 
-async def test_scrape_to_webhook_does_not_access_database(settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    import argparse
-
-    from pydantic import SecretStr
-
-    from scraper import whatsapp
-    from utils import webhook
-
-    configured = settings.model_copy(update={"webhook_token": SecretStr("x" * 40)})
-    monkeypatch.setattr(whatsapp, "WhatsAppScraper", lambda _: FakeScraper())
-    monkeypatch.setattr(DatabaseUtil, "transaction", lambda _: pytest.fail("Sender must not use DB"))
-    delivered = []
-
-    def deliver(url, conversations, settings):  # type: ignore[no-untyped-def]
-        delivered.extend(conversations)
-        return {"status": "accepted"}
-
-    monkeypatch.setattr(webhook, "deliver_conversations", deliver)
-    args = argparse.Namespace(command="scrape", webhook_url="http://127.0.0.1:8080/webhook")
-    assert await cli.dispatch(args, configured) == 0
-    assert len(delivered) == 1
+@pytest.mark.parametrize("args", [["webhook"], ["scrape", "--webhook-url", "http://127.0.0.1:8080/webhook"]])
+def test_removed_ingestion_options_fail_before_configuration(args, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(cli, "get_settings", lambda: pytest.fail("Removed options must fail before setup"))
+    with pytest.raises(SystemExit) as error:
+        cli.main(args)
+    assert error.value.code == 2
 
 
-def test_webhook_cli_stops_cleanly_on_interrupt(tmp_path: Path) -> None:
-    import os
-    import signal
-    import socket
+def test_cli_direct_scrape_deduplicates_and_records_each_run(run_cli) -> None:  # type: ignore[no-untyped-def]
+    first = run_cli("scrape")
+    second = run_cli("scrape")
+    assert first["status"] == second["status"] == "completed"
+    assert first["id"] != second["id"]
+    assert second["contacts_saved"] == second["messages_saved"] == 0
+    contacts = run_cli("contacts")
+    assert contacts["total"] == 1 and contacts["contacts"][0]["message_count"] == 3
+    cid = contacts["contacts"][0]["id"]
+    assert [m["message_text"] for m in run_cli("messages", "--contact", cid)] == ["d", "c", "b"]
+    assert run_cli("metrics")["scraping"]["runs"] == 2
 
-    root = Path(__file__).resolve().parents[1]
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    env = {**os.environ, "WEBHOOK_TOKEN": uuid.uuid4().hex + uuid.uuid4().hex}
-    stderr = tmp_path / "stderr.log"
-    with stderr.open("w") as log:
-        process = subprocess.Popen(
-            [sys.executable, str(root / "main.py"), "webhook", "--port", str(port)],
-            cwd=tmp_path,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=log,
-        )
-        try:
-            import time
 
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if "Webhook listening" in stderr.read_text():
-                    break
-                if process.poll() is not None:
-                    pytest.fail("Webhook exited before startup")
-                time.sleep(0.05)
-            assert "Webhook listening" in stderr.read_text()
-            process.send_signal(signal.SIGINT)
-            assert process.wait(timeout=5) == 130
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
+async def test_direct_scrape_rolls_back_all_conversations_on_storage_failure(database, settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class TwoContactScraper:
+        async def scrape(self) -> ScrapeOutput:
+            output = await FakeScraper().scrape()
+            output.result.conversations.append(conversation("2@c.us", "Second", None, ["a"]))
+            output.contacts_found = 2
+            output.messages_found = 5
+            return output
+
+    original = MessageRepository.insert_new
+    calls = 0
+
+    def insert(self, cid, messages):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            self.session.execute("SELECT * FROM nonexistent_test_table")
+        return original(self, cid, messages)
+
+    monkeypatch.setattr(MessageRepository, "insert_new", insert)
+    service = ScrapeService(settings, database, TwoContactScraper())
+    run = service.create_run()
+    result = await service.execute(run.id)
+    assert calls == 2 and result.status == "failed"
+    with database.transaction() as session:
+        assert ContactRepository(session).count() == MessageRepository(session).count() == 0
+        assert session.scalar("SELECT COUNT(*) FROM conversations") == 0
+        saved = RunRepository(session).get_scrape(run.id)
+        assert saved is not None and saved.status == "failed"

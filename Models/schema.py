@@ -249,9 +249,3 @@ class AgentState(TypedDict, total=False):
     expected: str | None
     prompt_tokens: int
     completion_tokens: int
-
-
-class WebhookPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    conversations: list[ScrapedConversation] = Field(min_length=1, max_length=500)

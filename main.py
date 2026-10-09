@@ -20,7 +20,6 @@ from utils.llm_pick import LLMNotConfiguredError, build_chat_model
 from utils.logging import configure_logging
 from utils.repositories import ContactRepository, MessageRepository, QualityRepository
 from utils.settings import Settings, get_settings
-from utils.webhook import WebhookDeliveryError
 
 
 def positive_int(value: str) -> int:
@@ -35,11 +34,7 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("init-db", "health", "seed-demo", "data-quality", "metrics"):
         commands.add_parser(name)
-    scrape = commands.add_parser("scrape")
-    scrape.add_argument("--webhook-url", help="Deliver extracted conversations to webhook instead of accessing DB")
-    webhook = commands.add_parser("webhook", help="Optional authenticated local ingress for scraper data")
-    webhook.add_argument("--host", default="127.0.0.1")
-    webhook.add_argument("--port", type=int, default=8080)
+    commands.add_parser("scrape", help="Scrape WhatsApp Web and save directly to PostgreSQL")
     login = commands.add_parser("login", help="Open a visible browser for manual WhatsApp QR login")
     login.add_argument("--timeout", type=positive_int, default=300)
     contacts = commands.add_parser("contacts")
@@ -85,27 +80,7 @@ async def dispatch(args: argparse.Namespace, settings: Settings) -> int:
 
         emit(export_graphs(args.output_dir, settings))
         return 0
-    if args.command == "scrape" and args.webhook_url:
-        from scraper.whatsapp import WhatsAppScraper
-        from utils.webhook import deliver_conversations, token_value
-
-        token_value(settings)
-        output = await WhatsAppScraper(settings).scrape()
-        emit(await asyncio.to_thread(deliver_conversations, args.webhook_url, output.result.conversations, settings))
-        return 0
     database = DatabaseUtil.from_settings(settings)
-    if args.command == "webhook":
-        from utils.webhook import create_server
-
-        if not 1 <= args.port <= 65535:
-            raise ValueError("Invalid webhook port")
-        with create_server(args.host, args.port, settings, database) as server:
-            print("Webhook listening; POST validated conversations to /webhook. Press Ctrl+C to stop.", file=sys.stderr)
-            try:
-                await asyncio.to_thread(server.serve_forever)
-            finally:
-                await asyncio.to_thread(server.shutdown)
-        return 0
     if args.command == "init-db":
         await asyncio.to_thread(database.initialize)
         emit({"status": "initialized", **await asyncio.to_thread(database.health)})
@@ -193,8 +168,6 @@ def main(argv: list[str] | None = None) -> int:
         print("Invalid configuration or input. Check .env and command arguments.", file=sys.stderr)
     except NotFoundError:
         print("Contact not found.", file=sys.stderr)
-    except WebhookDeliveryError as exc:
-        print(str(exc), file=sys.stderr)
     except (OSError, RuntimeError, ValueError):
         print("Command failed. Check the database schema, browser profile or input dataset.", file=sys.stderr)
     except KeyboardInterrupt:

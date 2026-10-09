@@ -2,6 +2,9 @@
 
 Local CLI + Playwright ingestion + Pydantic + PostgreSQL/psycopg2 + LangGraph specialist agents + OpenAI + LLM-as-Judge.
 
+Data flows directly from WhatsApp Web scraping through validated records into PostgreSQL, then to the agents.
+No ingestion server, webhook token or application listening port is needed.
+
 This project follows [AI_DATA_AGENTS](https://github.com/manikanta-yaswanth/AI_DATA_AGENTS)' role-based layout.
 **There is no FastAPI server, SQLAlchemy ORM or Alembic dependency in this version.**
 
@@ -149,8 +152,6 @@ Failures return a nonzero exit code.
 | `health` | Check PostgreSQL |
 | `login --timeout 300` | Manual QR login in visible Chromium |
 | `scrape` | Extract and persist one run; print its statistics |
-| `scrape --webhook-url http://127.0.0.1:8080/webhook` | Deliver scraper data to the optional webhook without DB access |
-| `webhook --port 8080` | Receive authenticated, validated JSON and persist it to PostgreSQL |
 | `seed-demo` | Load fake contacts/messages |
 | `contacts --name John --limit 20` | Find contacts and recent-message counts |
 | `contacts --phone-prefix +91` | Phone prefix filter |
@@ -169,56 +170,6 @@ Failures return a nonzero exit code.
 
 Use `uv run python main.py --help` or `uv run python main.py <command> --help`.
 Existing `scripts/login.py`, `scripts/scrape.py`, `scripts/seed_demo.py` and `scripts/evaluate.py` commands remain usable.
-
-## Optional scraper → webhook → PostgreSQL flow
-
-For a separate ingestion worker, use the small standard-library webhook receiver (not a FastAPI server).
-Direct `scrape` remains simpler when everything runs on one machine.
-
-1. Generate a secret locally: `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-   Store it as `WEBHOOK_TOKEN` in the receiver and scraper's private `.env` files.
-2. On the machine with local PostgreSQL, run `uv run python main.py init-db`,
-   then `uv run python main.py webhook --port 8080`.
-3. In a second terminal, after QR login, run:
-
-```powershell
-uv run python main.py scrape --webhook-url http://127.0.0.1:8080/webhook
-uv run python main.py contacts
-uv run python main.py query "What conversations need a follow-up?"
-```
-
-The sender does not connect to PostgreSQL. The receiver validates the same Pydantic models and atomically
-upserts/prunes data before agents query it. Delivery can be retried without duplicating stored messages.
-Webhook batches do not create local scrape-run records; the sender prints the receiver's persistence statistics.
-
-An external worker may POST JSON to `/webhook` with `Content-Type: application/json`,
-`Authorization: Bearer <WEBHOOK_TOKEN>`, and a body:
-
-```json
-{
-  "conversations": [{
-    "contact": {"whatsapp_id": "example@lid", "contact_name": "Example", "phone_number": null, "is_group": false},
-    "unread_count": 0,
-    "messages": [{
-      "whatsapp_message_id": "unique-message-id",
-      "sender_type": "contact",
-      "message_type": "text",
-      "message_text": "Example only",
-      "message_timestamp": "2026-10-08T12:00:00Z"
-    }]
-  }]
-}
-```
-
-Limits: 2 MiB per request and 500 conversations. The scraper sender automatically splits large extractions by
-both byte size and count; failures report how many batches arrived, and retrying deduplicates by IDs.
-A single conversation larger than 2 MiB is rejected during preflight, before sending any batches.
-Use stable message IDs and timezone-aware timestamps.
-Invalid bodies receive 422; database failures receive 503 and roll back the entire batch.
-The receiver binds to loopback by default; no token means it refuses to start.
-For non-local delivery use HTTPS via a secured reverse proxy, restrict access, and never publish the plain HTTP
-development listener directly. Plain HTTP delivery requires a literal loopback IP (not a hostname);
-loopback delivery bypasses environment proxies. The sender does not follow redirects with credentials.
 
 "Training agents on PostgreSQL" here means giving LangGraph agents approved database tools and prompt context,
 as in AI_DATA_AGENTS, not fine-tuning an LLM on private conversations.

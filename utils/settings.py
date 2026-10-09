@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     agent_max_iterations: int = Field(default=6, ge=1, le=20)
     judge_threshold: float = Field(default=0.7, ge=0, le=1)
     judge_max_retries: int = Field(default=1, ge=0, le=3)
-    webhook_token: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(
