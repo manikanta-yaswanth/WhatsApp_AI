@@ -3,6 +3,8 @@ from pathlib import Path
 
 import psycopg2
 import pytest
+from psycopg2 import sql
+from pydantic import ValidationError
 
 from Models.schema import ContactIn
 from tests.factories import BASE_TIME, conversation
@@ -40,6 +42,75 @@ def test_url_override_accepts_legacy_driver_and_special_password() -> None:
     assert settings.db_config["dbname"] == "db_test"
     assert settings.db_config["password"] == "abc@:/"
     assert "abc%40" not in repr(settings)
+
+
+def test_supabase_url_retains_pooler_username_ssl_and_private_schema() -> None:
+    settings = Settings(
+        database_url="postgresql://postgres.example_ref:test%40password@aws-0-example.pooler.supabase.com:5432/postgres?sslmode=require",
+        db_schema="whatsapp_demo",
+        _env_file=None,
+    )
+    assert settings.db_config["user"] == "postgres.example_ref"
+    assert settings.db_config["port"] == "5432"
+    assert settings.db_config["sslmode"] == "require"
+    assert settings.db_schema == "whatsapp_demo"
+    assert "test%40password" not in repr(settings)
+
+
+@pytest.mark.parametrize("schema", ["public; DROP TABLE contacts", "a.b", "../data", "A", "x" * 64])
+def test_invalid_schema_is_rejected(schema: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(db_schema=schema, _env_file=None)
+
+
+def test_blank_schema_keeps_legacy_search_path() -> None:
+    assert Settings(db_schema="", _env_file=None).db_schema is None
+
+
+def test_private_schema_isolated_idempotent_and_rls_enabled(database: DatabaseUtil) -> None:
+    name = "wa_private_" + uuid.uuid4().hex
+    private = DatabaseUtil(database._config, schema=name)
+    try:
+        private.initialize()
+        with private.transaction() as s:
+            s.execute("GRANT SELECT ON message_records TO PUBLIC")
+        private.initialize()
+        health = private.health()
+        assert health["connected"] == 1 and health["schema"] == name
+        assert isinstance(health["ssl"], bool)
+        with private.transaction() as s:
+            persist_conversations(s, [conversation("private@lid", "Private", None, ["secret"])], 3)
+            cid = s.scalar("SELECT id FROM whatsapp_contacts")
+            ContactRepository(s).set_classification(cid, "personal", "NO_ACTION", 0.9, "friendly")
+            assert MessageRepository(s).count() == 1
+            assert ContactRepository(s).get_conversation(cid).category == "personal"  # type: ignore[union-attr]
+            rows = s.all(
+                "SELECT relrowsecurity FROM pg_class WHERE relnamespace=%s::regnamespace AND relkind='r'", (name,)
+            )
+            assert len(rows) == 5 and all(r["relrowsecurity"] for r in rows)
+            assert (
+                s.scalar(
+                    """SELECT count(*) FROM pg_namespace n,
+                   LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
+                   WHERE n.nspname=%s AND a.grantee=0 AND a.privilege_type='USAGE'""",
+                    (name,),
+                )
+                == 0
+            )
+        with database.transaction() as s:
+            assert ContactRepository(s).count() == 0
+            assert (
+                s.scalar(
+                    """SELECT count(*) FROM pg_class c,
+                   LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+                   WHERE c.relnamespace=%s::regnamespace AND c.relkind IN ('r','v') AND a.grantee=0""",
+                    (name,),
+                )
+                == 0
+            )
+    finally:
+        with database.transaction() as s:
+            s.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
 def test_connection_commit_rollback_and_close(database: DatabaseUtil) -> None:
@@ -96,6 +167,12 @@ def test_fresh_schema_has_one_scraped_data_table_and_views(database: DatabaseUti
     with database.transaction() as s:
         tables = s.all(
             """SELECT table_name, table_type FROM information_schema.tables WHERE table_schema=current_schema()"""
+        )
+        assert all(
+            r["relrowsecurity"]
+            for r in s.all(
+                "SELECT relrowsecurity FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r'"
+            )
         )
     assert {r["table_name"] for r in tables if r["table_type"] == "BASE TABLE"} == {
         "whatsapp_contacts",

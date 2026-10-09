@@ -30,7 +30,7 @@ def positive_int(value: str) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="WhatsApp Conversation Intelligence — local PostgreSQL + LangGraph")
+    root = argparse.ArgumentParser(description="WhatsApp Conversation Intelligence — PostgreSQL/Supabase + LangGraph")
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("init-db", "health", "seed-demo", "data-quality", "metrics"):
         commands.add_parser(name)

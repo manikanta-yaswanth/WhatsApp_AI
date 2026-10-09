@@ -1,10 +1,12 @@
 # WhatsApp Conversation Intelligence
 
-Local CLI + Playwright ingestion + Pydantic + PostgreSQL/psycopg2 + LangGraph specialist agents + OpenAI + LLM-as-Judge.
+Local CLI + Playwright ingestion + Pydantic + Supabase/PostgreSQL + psycopg2 + LangGraph agents + OpenAI + LLM-as-Judge.
 
 Data flows directly from WhatsApp Web scraping through validated records into PostgreSQL, then to the agents.
 No ingestion server, webhook token or application listening port is needed.
 Scraped contact details and the latest three messages are stored together in **one table: `whatsapp_contacts`**.
+**Recommended storage: Supabase hosted PostgreSQL.** WhatsApp login, scraping and the CLI still run locally in VS Code.
+Local PostgreSQL is an optional alternative; no Supabase SDK, REST endpoint or webhook is needed.
 
 This project follows [AI_DATA_AGENTS](https://github.com/manikanta-yaswanth/AI_DATA_AGENTS)' role-based layout.
 **There is no FastAPI server, SQLAlchemy ORM or Alembic dependency in this version.**
@@ -67,7 +69,176 @@ They project this same row/JSON for the existing parameterized agent tools and C
 `scrape_runs`, `agent_runs`, `evaluation_runs` and `evaluations` remain separate operational/AI-run tables.
 All new scraped contacts, messages and conversation classifications are written only to `whatsapp_contacts`.
 
-## Local PostgreSQL setup in VS Code (Windows / PowerShell)
+## Supabase setup in VS Code (recommended)
+
+You need a Supabase project, [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.12+,
+and internet access. **You do not need local PostgreSQL or to share your Supabase login.**
+WhatsApp data will be stored in your Supabase cloud project, not solely on your computer.
+
+### 1. Install and update the project
+
+Open the project folder in VS Code's PowerShell terminal:
+
+```powershell
+Set-Location "C:\WhatsApp_Agents"
+Test-Path .\main.py
+git status --short
+git pull origin main
+uv python install 3.12
+uv sync
+uv run playwright install chromium
+if (-not (Test-Path ".env")) { Copy-Item ".env.example" ".env" }
+code .env
+```
+
+Replace the folder if different. On a fresh clone, skip the update commands.
+If Git reports local changes/conflicts, stop rather than reset/overwrite your configuration.
+Preserve your private WhatsApp profile and existing database backups when upgrading.
+
+### 2. Get a PostgreSQL connection URI, not an API key
+
+1. Open [Supabase Dashboard](https://supabase.com/dashboard) and create a dedicated project for this app,
+   or select your existing project. A separate empty project is safest for initial testing.
+2. Wait for it to be ready. Keep its **database password** private.
+3. Click **Connect → Session pooler** and copy the PostgreSQL URI using port **5432**.
+4. Replace `[YOUR-PASSWORD]` with your database password. URL-encode reserved characters in the password:
+   for example `@` → `%40`, `#` → `%23`, `&` → `%26`, and `%` → `%25`.
+5. Append `?sslmode=require` if there is no query string, or `&sslmode=require` if one already exists.
+
+Copy the exact host/username from **your** Connect dialog; do not guess the pooler host or region.
+Session-pooler usernames include the project reference (`postgres.PROJECT_REF`).
+Session mode supports IPv4 and suits this desktop CLI. Do not choose the transaction pooler on port 6543.
+Direct port-5432 connections also work with the project's IPv6 endpoint or IPv4 add-on when your network supports it.
+This app does **not** need the Supabase HTTPS URL, anon/publishable key, service-role key or access token.
+
+### 3. Configure a private demo schema
+
+Set these values in your local, gitignored `.env`, using your actual URI:
+
+```dotenv
+DATABASE_URL="postgresql://postgres.PROJECT_REF:ENCODED_PASSWORD@POOLER_HOST:5432/postgres?sslmode=require"
+DB_SCHEMA=whatsapp_demo
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+WHATSAPP_HEADLESS=false
+MAX_MESSAGES_PER_CONTACT=3
+MAX_CHATS_PER_SCRAPE=10
+INCLUDE_GROUPS=false
+```
+
+The URI above is a **template**, not a working connection.
+`DATABASE_URL` overrides local `database/host/port/user/password` settings, which can remain unused.
+OS environment variables override the file; clear stale values in this terminal if necessary:
+
+```powershell
+Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:DB_SCHEMA -ErrorAction SilentlyContinue
+```
+
+Never paste a completed URI/password in chat or commit it.
+`sslmode=require` requires encryption. For production, configure certificate verification with
+`sslmode=verify-full` and a trusted CA per
+[Supabase's SSL guidance](https://supabase.com/docs/guides/database/connecting-to-postgres#configure-ssl).
+Do not disable SSL to work around connection errors.
+
+**Privacy:** keep `whatsapp_demo` and `whatsapp_private` out of the Supabase Data API's exposed schemas.
+Do not grant `anon`/`authenticated` access to them. This CLI needs no Data API exposure.
+`init-db` enables RLS on the five application tables and removes public/API-role grants from those tables
+and the three record views in the selected schema. No anonymous-access policies are added.
+Use the table-owning database role (normally `postgres`) for this trusted backend CLI.
+Views can run with their owner's permissions; do not expose them just because underlying tables have RLS.
+These restrictions apply only to this application's configured schema, not unrelated tables/settings.
+
+### 4. Initialize and test fake data
+
+```powershell
+uv run python main.py init-db
+uv run python main.py health
+uv run python main.py seed-demo
+uv run python main.py contacts
+uv run python main.py messages
+uv run python main.py data-quality
+uv run python main.py seed-demo
+```
+
+Expect `health` to show `database: postgres`, `schema: whatsapp_demo`, `connected: 1` and `ssl: true`.
+If the schema is missing/NULL, initialize it before continuing.
+A fresh demo contains **4 contacts and 7 messages**; repeating the seed adds no new contacts/messages.
+In Supabase's **SQL Editor**, inspect only the demo schema:
+
+```sql
+SELECT contact_name, whatsapp_id, phone_number, recent_messages
+FROM whatsapp_demo.whatsapp_contacts;
+
+SELECT count(*) AS contacts, sum(jsonb_array_length(recent_messages)) AS messages
+FROM whatsapp_demo.whatsapp_contacts;
+```
+
+Select `whatsapp_demo` in the Table Editor's schema dropdown, or use the SQL Editor if the UI does not list it.
+The developer has not tested a live Supabase project; verify these checkpoints on your own project.
+
+### 5. Run agents on demo data
+
+Add your OpenAI key locally, then:
+
+```powershell
+uv run python main.py query "How many contacts are stored?"
+uv run python main.py query "Search my messages for an interview."
+uv run python main.py classify --limit 10
+uv run python main.py contacts
+uv run python main.py summarize "PASTE_CONTACT_UUID_HERE"
+uv run python main.py evaluate
+uv run python main.py metrics
+```
+
+Use the database contact UUID from `contacts`, not a phone number.
+AI commands incur API usage and send selected stored conversation data to OpenAI.
+
+### 6. Switch to real WhatsApp data
+
+Change only `DB_SCHEMA=whatsapp_private`, leaving the same project URI. Then:
+
+```powershell
+uv run python main.py init-db
+uv run python main.py health
+uv run python main.py login --timeout 300
+# Scan WhatsApp > Settings > Linked devices > Link a device in the opened browser.
+uv run python main.py scrape
+uv run python main.py contacts
+uv run python main.py messages --limit 10
+uv run python main.py data-quality
+uv run python main.py query "How many contacts are stored?"
+```
+
+Confirm `health` names `whatsapp_private` **before** scraping. Never run `seed-demo` there.
+Compare stored names, timestamps and newest messages against your WhatsApp chats locally.
+After a successful small scrape, increase `MAX_CHATS_PER_SCRAPE` to 200 if desired.
+The scraping command is a refresh, not an automatic live-message subscription.
+
+Qualify Supabase SQL objects with the intended schema, for example:
+
+```sql
+SELECT contact_name, whatsapp_id, phone_number,
+       jsonb_array_length(recent_messages) AS stored_message_count,
+       recent_messages -> 0 ->> 'message_text' AS latest_message
+FROM whatsapp_private.whatsapp_contacts
+ORDER BY last_message_at DESC NULLS LAST;
+
+SELECT whatsapp_message_id, count(*)
+FROM whatsapp_private.message_records
+GROUP BY whatsapp_message_id HAVING count(*) > 1;
+```
+
+Existing local PostgreSQL data is not automatically uploaded to a different Supabase server.
+Changing the connection leaves the old database untouched; re-scrape into Supabase or plan a separate
+backup/import if you need old operational history.
+
+Official references:
+[PostgreSQL connections](https://supabase.com/docs/guides/database/connecting-to-postgres),
+[Data API security](https://supabase.com/docs/guides/database/hardening-data-api),
+[RLS](https://supabase.com/docs/guides/database/postgres/row-level-security).
+
+## Local PostgreSQL setup (optional alternative)
 
 Prerequisites: [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.12+ and a local PostgreSQL 14+ server.
 Install PostgreSQL from [the official Windows download page](https://www.postgresql.org/download/windows/) if needed.
@@ -139,6 +310,7 @@ Start with the demo database. Replace the password placeholder **only on your ma
 
 ```dotenv
 database=whatsapp_ai_demo
+DB_SCHEMA=
 host=localhost
 port=5432
 user=postgres
@@ -214,9 +386,10 @@ Saved legacy messages are copied without truncation; the next scrape applies the
 Do not run old and new versions against this database simultaneously.
 
 `init-db` does not drop/truncate tables and is not a general migration engine for arbitrary custom schemas.
+Application tables use RLS and no public/API-role grants; run the trusted CLI with their owning database role.
 Replace Alembic/Uvicorn/API calls with the CLI commands below.
 
-## End-to-end checks
+## Local PostgreSQL end-to-end checks
 
 ### 1. Demo persistence, before WhatsApp or OpenAI
 
@@ -423,6 +596,9 @@ only its own uniquely named schema, not real tables or rows.
 
 ### With your local PostgreSQL (no Docker needed)
 
+This section is for the optional local PostgreSQL setup only. Supabase users should use the disposable
+Docker database below for automated tests, not their cloud project or a changed Supabase database name.
+
 In pgAdmin, with auto-commit enabled, create a separate disposable database:
 
 ```sql
@@ -467,6 +643,11 @@ never point tests at a real-data database.
 | PostgreSQL operation failed | Check service, port, database existence, password/role permissions and configuration precedence; connect with the same values in pgAdmin. |
 | Database does not exist | Create it first; `init-db` creates tables, not databases. |
 | Database setting seems ignored | Remove an old `DATABASE_URL` or stale environment override and save the correct `.env`. |
+| Supabase host cannot be reached | Use the exact Session pooler host/username from Connect (5432); check project status, network restrictions and outbound connectivity. |
+| Supabase password authentication fails | Use the database password, URL-encode reserved characters, and preserve the pooler username's project-reference suffix. |
+| Supabase permission denied or RLS blocks writes | Use the owning database role; do not disable RLS or add anonymous-access policies. |
+| Supabase SQL Editor shows different data | Qualify tables with `whatsapp_demo.` or `whatsapp_private.`; both are in the `postgres` database. |
+| Missing relation after a schema change | Run `init-db` with the intended `DB_SCHEMA`, then verify `health`. |
 | Tables not visible | Refresh Query Tool/Tables on the database named by `health`; record projections are under Views. |
 | Old `contacts/messages/conversations` tables remain | They are retained migration snapshots; inspect `whatsapp_contacts` for current data. |
 | Browser executable missing | Run `uv run playwright install chromium`. |
@@ -482,6 +663,7 @@ is correct. Verify stored records against the source. Send only redacted errors,
 
 ## Privacy
 
+- With Supabase, stored contacts/messages live in the cloud project; keep the application's schemas private.
 - `.env`, browser authentication state and generated diagrams/exports are gitignored.
 - Message/query/answer content is redacted from application logs. It is still stored in PostgreSQL where needed.
 - AI commands send selected contact/message data and questions to OpenAI. Use only with data you are authorized to process.

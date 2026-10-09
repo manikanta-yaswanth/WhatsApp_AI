@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from psycopg2.extensions import parse_dsn
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     database_url: SecretStr | None = None
+    db_schema: str | None = Field(default=None, pattern=r"^[a-z_][a-z0-9_]{0,62}$")
     database: str = "whatsapp_ai"
     host: str = "localhost"
     port: int = Field(default=5432, ge=1, le=65535)
@@ -34,6 +35,11 @@ class Settings(BaseSettings):
     agent_max_iterations: int = Field(default=6, ge=1, le=20)
     judge_threshold: float = Field(default=0.7, ge=0, le=1)
     judge_max_retries: int = Field(default=1, ge=0, le=3)
+
+    @field_validator("db_schema", mode="before")
+    @classmethod
+    def empty_schema_is_unset(cls, value: str | None) -> str | None:
+        return value or None
 
     @classmethod
     def settings_customise_sources(
